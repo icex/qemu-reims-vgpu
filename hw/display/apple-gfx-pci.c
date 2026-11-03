@@ -25,6 +25,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/main-loop.h"
+#include "qemu/timer.h"
 #include "system/address-spaces.h"
 #include "hw/core/boards.h"
 #include "hw/pci/pci_device.h"
@@ -65,17 +66,77 @@ static void apple_gfx_pci_finalize(Object *obj)
     apple_gfx_common_finalize(&s->common);
 }
 
+/* The callback table owns this context until its last callback returns. */
+typedef struct AppleGFXPCIInterruptContext {
+    PCIDevice *device;
+    QEMUBH *bh;
+    uint64_t callbacks;
+} AppleGFXPCIInterruptContext;
+
+static void apple_gfx_pci_irq_bh(void *opaque)
+{
+    AppleGFXPCIInterruptContext *irq = opaque;
+    bool enabled = msi_enabled(irq->device);
+    uint64_t callbacks = qatomic_xchg(&irq->callbacks, 0);
+
+    /* BH dequeue rearms before this call: an arrival during notify goes next. */
+    if (enabled) {
+        msi_notify(irq->device, 0);
+    }
+    trace_apple_gfx_pci_irq_batch(callbacks, enabled);
+}
+
+static void apple_gfx_pci_irq_free_bh(void *opaque)
+{
+    AppleGFXPCIInterruptContext *irq = opaque;
+
+    /* The main AioContext serializes this with delivery; producers have ended. */
+    qemu_bh_delete(irq->bh);
+    object_unref(OBJECT(irq->device));
+    g_free(irq);
+}
+
+static void apple_gfx_pci_irq_destroy(void *opaque)
+{
+    /* Producers ended; queued deliveries retire on their own AioContext. */
+    aio_bh_schedule_oneshot(qemu_get_aio_context(),
+                            apple_gfx_pci_irq_free_bh, opaque);
+}
+
+static AppleGFXPCIInterruptContext *apple_gfx_pci_irq_new(PCIDevice *dev)
+{
+    AppleGFXPCIInterruptContext *irq = g_new0(AppleGFXPCIInterruptContext, 1);
+
+    object_ref(OBJECT(dev));
+    irq->device = dev;
+    irq->bh = qemu_bh_new(apple_gfx_pci_irq_bh, irq);
+    return irq;
+}
+
 typedef struct AppleGFXPCIInterruptJob {
     PCIDevice *device;
     uint32_t vector;
+    int64_t queued_ns;
 } AppleGFXPCIInterruptJob;
 
 static void apple_gfx_pci_raise_interrupt(void *opaque)
 {
     AppleGFXPCIInterruptJob *job = opaque;
+    bool enabled = msi_enabled(job->device);
+    bool traced =
+        trace_event_get_state_backends(TRACE_APPLE_GFX_PCI_IRQ_DELIVER);
+    int64_t notify_ns = 0;
 
-    if (msi_enabled(job->device)) {
+    if (traced) {
+        notify_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
+    if (enabled) {
         msi_notify(job->device, job->vector);
+    }
+    if (traced) {
+        trace_apple_gfx_pci_irq_deliver(job->vector, enabled, job->queued_ns,
+                                      notify_ns,
+                                      qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
     }
     g_free(job);
 }
@@ -87,15 +148,15 @@ static void apple_gfx_pci_raise_interrupt(void *opaque)
  */
 static void apple_gfx_pci_raise_interrupt_cb(void *ctx, uint32_t vector)
 {
-    PCIDevice *dev = ctx;
-    AppleGFXPCIInterruptJob *job;
+    AppleGFXPCIInterruptContext *irq = ctx;
 
+    assert(vector == 0 && RVG_PCI_MSI_VECTORS == 1);
     trace_apple_gfx_raise_irq(vector);
-    job = g_new0(AppleGFXPCIInterruptJob, 1);
-    job->device = dev;
-    job->vector = vector;
-    aio_bh_schedule_oneshot(qemu_get_aio_context(),
-                            apple_gfx_pci_raise_interrupt, job);
+    if (trace_event_get_state_backends(TRACE_APPLE_GFX_PCI_IRQ_BATCH)) {
+        qatomic_inc(&irq->callbacks);
+    }
+    /* No timer: merge only callbacks queued before the main loop dequeues it. */
+    qemu_bh_schedule(irq->bh);
 }
 
 /*
@@ -139,7 +200,7 @@ static void apple_gfx_pci_realize(PCIDevice *dev, Error **errp)
     AppleGFXPCIState *s = APPLE_GFX_PCI(dev);
     RvgHostCallbacks callbacks = {
         .struct_size = sizeof(callbacks),
-        .ctx = dev,
+        .destroy = apple_gfx_pci_irq_destroy,
         .raise_interrupt = apple_gfx_pci_raise_interrupt_cb,
     };
     RvgDeviceConfig config = {
@@ -165,6 +226,7 @@ static void apple_gfx_pci_realize(PCIDevice *dev, Error **errp)
         .callbacks = &callbacks,
     };
     MemoryRegion *ram = MACHINE(qdev_get_machine())->ram;
+    AppleGFXPCIInterruptContext *irq;
     int ret;
 
     pci_register_bar(dev, RVG_PCI_BAR_MMIO,
@@ -191,7 +253,13 @@ static void apple_gfx_pci_realize(PCIDevice *dev, Error **errp)
         return;
     }
 
-    apple_gfx_common_realize(&s->common, DEVICE(dev), &config, errp);
+    irq = apple_gfx_pci_irq_new(dev);
+    callbacks.ctx = irq;
+    if (!apple_gfx_common_realize(&s->common, DEVICE(dev), &config, errp) &&
+        !s->common.host_callbacks_submitted) {
+        /* Validation failed before the library accepted the callback table. */
+        apple_gfx_pci_irq_destroy(irq);
+    }
 }
 
 static void apple_gfx_pci_reset(Object *obj, ResetType type)
@@ -217,6 +285,13 @@ static const Property apple_gfx_pci_properties[] = {
      * own modes at its density.
      */
     DEFINE_PROP_STRING("resolution", AppleGFXPCIState, common.resolution),
+    /*
+     * With a window, the least milliseconds between two reads of a frame
+     * back into QEMU's console surface (a SPICE or VNC listener's, a
+     * screendump's); 0 reads every new frame a listener asks for.
+     */
+    DEFINE_PROP_UINT32("window-readback-interval", AppleGFXPCIState,
+                       common.window_readback_interval_ms, 0),
     /* BAR 2, the EFI framebuffer's window for guests without a driver */
     DEFINE_PROP_BOOL("efi-framebuffer-bar", AppleGFXPCIState, efi_fb_bar, true),
 };
@@ -315,6 +390,9 @@ static void apple_gfx_iosurface_pci_raise_interrupt_cb(void *ctx,
     job = g_new0(AppleGFXPCIInterruptJob, 1);
     job->device = ctx;
     job->vector = vector;
+    if (trace_event_get_state_backends(TRACE_APPLE_GFX_PCI_IRQ_DELIVER)) {
+        job->queued_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
     aio_bh_schedule_oneshot(qemu_get_aio_context(),
                             apple_gfx_pci_raise_interrupt, job);
 }

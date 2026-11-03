@@ -47,6 +47,8 @@ typedef struct AppleGFXDisplay {
     bool frame_dirty;
     /* Until then, on QEMU_CLOCK_REALTIME, a listener shows the surface */
     int64_t watched_until_ms;
+    /* When the last render began, on QEMU_CLOCK_REALTIME */
+    int64_t render_began_ms;
     bool cursor_show;
 } AppleGFXDisplay;
 
@@ -58,6 +60,8 @@ struct AppleGFXState {
     /* Initialised on init/realize() */
     MemoryRegion iomem_gfx;
     RvgDevice *pgdev;
+    /* This realization passed the valid host callback table to the library. */
+    bool host_callbacks_submitted;
     /* Called after the library takes a guest write; may take the BQL */
     void (*mmio_written)(AppleGFXState *s, hwaddr offset, uint32_t value);
     /*
@@ -79,6 +83,12 @@ struct AppleGFXState {
      * and sends its input (-display none, unless REIMS_VGPU_WINDOW=0).
      */
     bool window;
+    /*
+     * With a window, the least time in milliseconds between two renders a
+     * display change listener's refresh asks for; 0 is none. Each render
+     * reads the whole frame back, and the window already shows it.
+     */
+    uint32_t window_readback_interval_ms;
     /* Realize began a hold on the activity against App Nap. */
     bool holds_activity;
     AppleGFXDisplay displays[RVG_MAX_DISPLAY_PORTS];

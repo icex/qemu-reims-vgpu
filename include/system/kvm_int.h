@@ -118,6 +118,8 @@ struct KVMState
 #endif
     int max_nested_state_len;
     int kvm_shadow_mem;
+    bool halt_poll_ns_set;
+    uint64_t halt_poll_ns;
     bool kernel_irqchip_allowed;
     bool kernel_irqchip_required;
     OnOffAuto kernel_irqchip_split;

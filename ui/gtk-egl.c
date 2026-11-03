@@ -254,6 +254,7 @@ void gd_egl_scanout_texture(DisplayChangeListener *dcl,
     gtk_egl_set_scanout_mode(vc, true);
     egl_fb_setup_for_tex(&vc->gfx.guest_fb, backing_width, backing_height,
                          backing_id, false);
+    gd_keep_aspect(vc, w, h);
 }
 
 void gd_egl_scanout_dmabuf(DisplayChangeListener *dcl,
@@ -373,9 +374,19 @@ EGLSyncKHR gd_egl_scanout_flush(DisplayChangeListener *dcl,
         py_offset = (ph_widget - ph_surface) / 2;
     }
 
+    /*
+     * Letterbox: the picture is centred and keeps its aspect, so clear the whole window
+     * first; otherwise the bars show stale contents of the swapped back buffer.
+     */
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, pw_widget, ph_widget);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
     egl_fb_setup_default(&vc->gfx.win_fb, pw_surface, ph_surface,
                          px_offset, py_offset);
-    if (vc->gfx.cursor_fb.texture) {
+    if (vc->gfx.cursor_fb.texture &&
+        g_strcmp0(g_getenv("RGPU_HOST_CURSOR"), "1") != 0) {
         egl_texture_blit(vc->gfx.gls, &vc->gfx.win_fb, &vc->gfx.guest_fb,
                          vc->gfx.y0_top);
         egl_texture_blend(vc->gfx.gls, &vc->gfx.win_fb, &vc->gfx.cursor_fb,

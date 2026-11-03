@@ -1159,6 +1159,15 @@ static int slirp_guestfwd(SlirpState *s, const char *config_str, Error **errp)
                        "forwarding rule '%s'", config_str);
             return -1;
         }
+    } else if (g_str_has_prefix(p, "unix-socket:")) {
+        /* A per-connection Unix socket avoids spawning in the VM process.
+         * Keep the existing cmd and character-device syntaxes unchanged. */
+        if (slirp_add_unix(s->slirp, p + strlen("unix-socket:"),
+                           &server, port) < 0) {
+            error_setg(errp, "Conflicting/invalid Unix guest forwarding rule '%s'",
+                       config_str);
+            return -1;
+        }
     } else {
         Error *err = NULL;
         /*

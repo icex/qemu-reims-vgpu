@@ -200,6 +200,9 @@ static const Property apple_gfx_mmio_properties[] = {
      * own modes at its density.
      */
     DEFINE_PROP_STRING("resolution", AppleGFXMMIOState, common.resolution),
+    /* As apple-gfx-pci's */
+    DEFINE_PROP_UINT32("window-readback-interval", AppleGFXMMIOState,
+                       common.window_readback_interval_ms, 0),
 };
 
 static void apple_gfx_mmio_class_init(ObjectClass *klass, const void *data)

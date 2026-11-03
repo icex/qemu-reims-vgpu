@@ -44,6 +44,10 @@ typedef struct VirtualGfxConsole {
     double preferred_scale;
     double scale_x;
     double scale_y;
+    int keep_w, keep_h;   /* zoom-to-fit: guest scanout aspect the window snaps to */
+    int snap_w, snap_h;   /* drawing-area size after the last snap: which axis moved */
+    guint snap_source;
+    bool snap_connected;
 #if defined(CONFIG_OPENGL)
     QemuGLShader *gls;
     EGLContext ectx;
@@ -161,6 +165,7 @@ extern bool gtk_use_gl_area;
 
 /* ui/gtk.c */
 void gd_update_windowsize(VirtualConsole *vc);
+void gd_keep_aspect(VirtualConsole *vc, int width, int height);
 void gd_update_monitor_refresh_rate(VirtualConsole *vc, GtkWidget *widget);
 void gd_gl_wait_sync(VirtualConsole *vc, void *sync);
 void gd_release_dmabuf(VirtualConsole *vc, QemuDmaBuf *dmabuf);

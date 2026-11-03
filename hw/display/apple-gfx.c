@@ -138,6 +138,7 @@ static bool apple_gfx_render_new_frame(AppleGFXDisplay *d)
     }
     d->frame_dirty = false;
     d->rendering = true;
+    d->render_began_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     job = g_new0(AppleGFXRenderJob, 1);
     job->d = d;
@@ -216,10 +217,19 @@ static void new_frame_handler_bh(void *opaque)
 static bool apple_gfx_fb_update_display(void *opaque)
 {
     AppleGFXDisplay *d = opaque;
+    uint32_t interval = d->state->window_readback_interval_ms;
+    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     assert(bql_locked());
-    d->watched_until_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
-                          APPLE_GFX_WATCH_MS;
+    d->watched_until_ms = now + APPLE_GFX_WATCH_MS;
+    /*
+     * A window shows the frames already: within the interval the surface
+     * keeps the last frame read, and the update is done.
+     */
+    if (d->state->window && interval != 0 && !d->rendering &&
+        now - d->render_began_ms < interval) {
+        return true;
+    }
     return !apple_gfx_render_new_frame(d);
 }
 
@@ -573,6 +583,11 @@ static uint64_t apple_gfx_read(void *opaque, hwaddr offset, unsigned size)
     uint64_t value = rvg_device_mmio_read(s->pgdev, offset);
 
     trace_apple_gfx_read(offset, value);
+    if ((offset == 0x1014 || offset == 0x1018 || offset == 0x102c) &&
+        trace_event_get_state_backends(TRACE_APPLE_GFX_IRQ_READ)) {
+        trace_apple_gfx_irq_read(offset, value,
+                               qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+    }
     return value;
 }
 
@@ -1049,6 +1064,7 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
     RvgStatus status;
     uint32_t i;
 
+    s->host_callbacks_submitted = false;
     if (s->num_displays < 1 || s->num_displays > RVG_MAX_DISPLAY_PORTS) {
         error_setg(errp, "apple-gfx: displays must be 1 to %u, not %" PRIu32,
                    RVG_MAX_DISPLAY_PORTS, s->num_displays);
@@ -1093,6 +1109,8 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
         s->displays[i].cursor_show = true;
     }
 
+    /* sizeof(config) and sizeof(callbacks) are valid: this transfers the table. */
+    s->host_callbacks_submitted = true;
     status = rvg_device_create(config, &s->pgdev);
     if (status != RVG_OK) {
         error_setg(errp, "apple-gfx: rvg_device_create: %s",

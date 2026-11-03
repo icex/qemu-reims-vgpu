@@ -202,6 +202,9 @@ dm163_refresh_rate(uint32_t rr) "refresh rate %d"
 apple_gfx_read(uint64_t offset, uint64_t res) "offset=0x%"PRIx64" res=0x%"PRIx64
 apple_gfx_write(uint64_t offset, uint64_t val) "offset=0x%"PRIx64" val=0x%"PRIx64
 apple_gfx_raise_irq(uint32_t vector) "vector=0x%x"
+apple_gfx_pci_irq_deliver(uint32_t vector, bool enabled, int64_t queued_ns, int64_t notify_ns, int64_t done_ns) "vector=0x%x msi=%d queued_ns=%"PRId64" notify_ns=%"PRId64" done_ns=%"PRId64
+apple_gfx_pci_irq_batch(uint64_t callbacks, bool enabled) "callbacks=%"PRIu64" msi=%d"
+apple_gfx_irq_read(uint64_t offset, uint64_t value, int64_t read_ns) "offset=0x%"PRIx64" value=0x%"PRIx64" read_ns=%"PRId64
 apple_gfx_new_frame(void) ""
 apple_gfx_mode_change(uint64_t x, uint64_t y) "x=%"PRId64" y=%"PRId64
 apple_gfx_cursor_set(uint32_t bpp, uint64_t width, uint64_t height) "bpp=%d width=%"PRId64" height=0x%"PRId64

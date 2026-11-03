@@ -50,6 +50,7 @@
 #include "qemu/guest-random.h"
 #include "system/hw_accel.h"
 #include "kvm-cpus.h"
+#include "halt-poll.h"
 #include "system/dirtylimit.h"
 #include "qemu/range.h"
 
@@ -2673,6 +2674,11 @@ uint32_t kvm_dirty_ring_size(void)
     return kvm_state->kvm_dirty_ring_size;
 }
 
+static int kvm_halt_poll_ioctl(void *opaque, unsigned long request, uintptr_t arg)
+{
+    return kvm_vm_ioctl(opaque, request, (void *)arg);
+}
+
 static int do_kvm_create_vm(KVMState *s, int type)
 {
     int ret;
@@ -2818,7 +2824,14 @@ static int kvm_reset_vmfd(MachineState *ms)
     }
 
     s->vmfd = ret;
-
+    ret = kvm_apply_halt_poll(s->halt_poll_ns_set, s->halt_poll_ns,
+                              kvm_halt_poll_ioctl, s);
+    if (ret < 0) {
+        error_report("Per-VM halt-poll-ns failed: %s", strerror(-ret));
+        close(s->vmfd);
+        s->vmfd = -1;
+        return ret;
+    }
     /* guest state is now unprotected again */
     kvm_state->guest_state_protected = false;
 
@@ -2968,7 +2981,12 @@ static int kvm_init(AccelState *as, MachineState *ms)
     }
 
     s->vmfd = ret;
-
+    ret = kvm_apply_halt_poll(s->halt_poll_ns_set, s->halt_poll_ns,
+                              kvm_halt_poll_ioctl, s);
+    if (ret < 0) {
+        error_report("Per-VM halt-poll-ns failed: %s", strerror(-ret));
+        goto err;
+    }
     s->nr_as = kvm_vm_check_extension(s, KVM_CAP_MULTI_ADDRESS_SPACE);
     if (s->nr_as <= 1) {
         s->nr_as = 1;
@@ -4097,6 +4115,31 @@ static bool kvm_accel_has_memory(AccelState *accel, AddressSpace *as,
     return false;
 }
 
+/* Local experiment: a VM-specific override, never the host module parameter. */
+static void kvm_get_halt_poll_ns(Object *obj, Visitor *v,
+                                 const char *name, void *opaque, Error **errp)
+{
+    KVMState *s = KVM_STATE(obj);
+    uint64_t value = s->halt_poll_ns;
+    visit_type_uint64(v, name, &value, errp);
+}
+
+static void kvm_set_halt_poll_ns(Object *obj, Visitor *v,
+                                 const char *name, void *opaque, Error **errp)
+{
+    KVMState *s = KVM_STATE(obj);
+    uint64_t value;
+    if (s->fd != -1) {
+        error_setg(errp, "Cannot set halt-poll-ns after KVM initialization");
+        return;
+    }
+    if (!visit_type_uint64(v, name, &value, errp)) {
+        return;
+    }
+    s->halt_poll_ns = value;
+    s->halt_poll_ns_set = true;
+}
+
 static void kvm_get_kvm_shadow_mem(Object *obj, Visitor *v,
                                    const char *name, void *opaque,
                                    Error **errp)
@@ -4253,6 +4296,8 @@ static void kvm_accel_instance_init(Object *obj)
     s->fd = -1;
     s->vmfd = -1;
     s->kvm_shadow_mem = -1;
+    s->halt_poll_ns_set = false;
+    s->halt_poll_ns = 0;
     s->kernel_irqchip_allowed = true;
     s->kernel_irqchip_split = ON_OFF_AUTO_AUTO;
     /* KVM dirty ring is by default off */
@@ -4283,6 +4328,11 @@ static void kvm_accel_class_init(ObjectClass *oc, const void *data)
         NULL, NULL);
     object_class_property_set_description(oc, "kernel-irqchip",
         "Configure KVM in-kernel irqchip");
+
+    object_class_property_add(oc, "halt-poll-ns", "uint64",
+        kvm_get_halt_poll_ns, kvm_set_halt_poll_ns, NULL, NULL);
+    object_class_property_set_description(oc, "halt-poll-ns",
+        "Per-VM KVM halt polling cap in ns (omitted: host default; 0: off)");
 
     object_class_property_add(oc, "kvm-shadow-mem", "int",
         kvm_get_kvm_shadow_mem, kvm_set_kvm_shadow_mem,

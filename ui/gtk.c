@@ -288,6 +288,11 @@ static void gd_update_geometry_hints(VirtualConsole *vc)
         double scale_y = s->free_scale ? VC_SCALE_MIN : vc->gfx.scale_y;
         geo.min_width  = surface_width(vc->gfx.ds) * scale_x;
         geo.min_height = surface_height(vc->gfx.ds) * scale_y;
+        if (s->free_scale) {
+            /* A quarter of a 5K guest is 1280x720: keep small windows possible. */
+            geo.min_width = MIN(geo.min_width, 640);
+            geo.min_height = MIN(geo.min_height, 360);
+        }
         mask |= GDK_HINT_MIN_SIZE;
         geo_widget = vc->gfx.drawing_area;
         gtk_widget_set_size_request(geo_widget, geo.min_width, geo.min_height);
@@ -333,6 +338,118 @@ static void gd_update_geometry_hints(VirtualConsole *vc)
 
     geo_window = GTK_WINDOW(vc->window ? vc->window : s->window);
     gtk_window_set_geometry_hints(geo_window, geo_widget, &geo, mask);
+}
+
+/*
+ * Zoom-to-fit, with RGPU_SNAP_ASPECT=1: snap the window to the guest scanout's aspect so
+ * the picture fills it without bars. A window-manager aspect hint made corner drags stick (KWin enforces it
+ * on every motion), so the drag stays free and the window snaps once the size has been
+ * still for 150 ms: the axis the user changed most leads and the other follows, so a
+ * top/bottom edge drag resizes proportionally instead of snapping back. Maximized and
+ * fullscreen windows are left alone.
+ */
+static gboolean gd_snap_aspect(gpointer opaque)
+{
+    VirtualConsole *vc = opaque;
+    GtkDisplayState *s = vc->s;
+    GtkWindow *win = GTK_WINDOW(vc->window ? vc->window : s->window);
+    GtkAllocation a;
+    int ww, wh, want;
+
+    vc->gfx.snap_source = 0;
+    if (!s->free_scale || s->full_screen || vc->gfx.keep_w <= 0 || vc->gfx.keep_h <= 0 ||
+        !gtk_widget_get_realized(vc->gfx.drawing_area) || gtk_window_is_maximized(win)) {
+        return G_SOURCE_REMOVE;
+    }
+    gtk_window_get_size(win, &ww, &wh);
+    gtk_widget_get_allocation(vc->gfx.drawing_area, &a);
+    if (a.width <= 1 || a.height <= 1 || wh < a.height) {
+        return G_SOURCE_REMOVE;
+    }
+    if (vc->gfx.snap_w > 0 && vc->gfx.snap_h > 0 &&
+        abs(a.height - vc->gfx.snap_h) * vc->gfx.keep_w > abs(a.width - vc->gfx.snap_w) * vc->gfx.keep_h) {
+        /* Mostly a height change: the width follows. */
+        want = (int)((int64_t)a.height * vc->gfx.keep_w / vc->gfx.keep_h);
+        vc->gfx.snap_w = want;
+        vc->gfx.snap_h = a.height;
+        if (abs(want - a.width) > 1) {
+            gtk_window_resize(win, ww - a.width + want, wh);
+        }
+        return G_SOURCE_REMOVE;
+    }
+    want = (int)((int64_t)a.width * vc->gfx.keep_h / vc->gfx.keep_w);
+    vc->gfx.snap_w = a.width;
+    vc->gfx.snap_h = want;
+    if (abs(want - a.height) > 1) {
+        gtk_window_resize(win, ww, wh - a.height + want);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void gd_snap_aspect_later(GtkWidget *widget, GdkRectangle *allocation, gpointer opaque)
+{
+    VirtualConsole *vc = opaque;
+
+    if (vc->gfx.snap_source) {
+        g_source_remove(vc->gfx.snap_source);
+    }
+    vc->gfx.snap_source = g_timeout_add(150, gd_snap_aspect, vc);
+}
+
+void gd_keep_aspect(VirtualConsole *vc, int width, int height)
+{
+    GtkDisplayState *s = vc->s;
+    GtkWindow *win = GTK_WINDOW(vc->window ? vc->window : s->window);
+    GdkWindow *gwin;
+    GdkMonitor *monitor;
+    GdkRectangle workarea;
+    int win_w, win_h, area_w, area_h, chrome_w, chrome_h;
+    int max_w, max_h, fit_w, fit_h;
+
+    if (vc->type != GD_VC_GFX || width <= 0 || height <= 0 ||
+        (vc->gfx.keep_w == width && vc->gfx.keep_h == height)) {
+        return;
+    }
+    vc->gfx.keep_w = width;
+    vc->gfx.keep_h = height;
+    if (g_strcmp0(g_getenv("RGPU_AUTO_FIT"), "1") == 0 &&
+        !s->full_screen && !gtk_window_is_maximized(win) &&
+        gtk_widget_get_realized(GTK_WIDGET(win))) {
+        gwin = gtk_widget_get_window(GTK_WIDGET(win));
+        monitor = gdk_display_get_monitor_at_window(gdk_window_get_display(gwin),
+                                                     gwin);
+        if (monitor) {
+            gdk_monitor_get_workarea(monitor, &workarea);
+            gtk_window_get_size(win, &win_w, &win_h);
+            area_w = gtk_widget_get_allocated_width(vc->gfx.drawing_area);
+            area_h = gtk_widget_get_allocated_height(vc->gfx.drawing_area);
+            chrome_w = MAX(0, win_w - area_w);
+            chrome_h = MAX(0, win_h - area_h);
+            max_w = MAX(1, workarea.width - chrome_w - 48);
+            max_h = MAX(1, workarea.height - chrome_h - 48);
+            fit_w = MIN(width, max_w);
+            fit_h = MIN(height, max_h);
+            if ((int64_t)fit_w * height > (int64_t)fit_h * width) {
+                fit_w = MAX(1, (int)((int64_t)fit_h * width / height));
+            } else {
+                fit_h = MAX(1, (int)((int64_t)fit_w * height / width));
+            }
+            gtk_window_resize(win, fit_w + chrome_w, fit_h + chrome_h);
+            fprintf(stderr, "rgpu-auto-fit guest=%dx%d workarea=%dx%d window=%dx%d\n",
+                    width, height, workarea.width, workarea.height,
+                    fit_w + chrome_w, fit_h + chrome_h);
+        }
+    }
+    /* Opt-in: by default the window keeps any shape and the picture letterboxes. */
+    if (g_strcmp0(g_getenv("RGPU_SNAP_ASPECT"), "1") != 0) {
+        return;
+    }
+    if (!vc->gfx.snap_connected) {
+        g_signal_connect(vc->gfx.drawing_area, "size-allocate",
+                         G_CALLBACK(gd_snap_aspect_later), vc);
+        vc->gfx.snap_connected = true;
+    }
+    gd_snap_aspect_later(NULL, NULL, vc);
 }
 
 void gd_update_windowsize(VirtualConsole *vc)
@@ -835,10 +952,12 @@ void gd_update_scale(VirtualConsole *vc, int ww, int wh, int fbw, int fbh)
         return;
     }
 
-    if (vc->s->full_screen) {
+    if (vc->s->full_screen && !vc->s->keep_aspect_ratio) {
         vc->gfx.scale_x = (double)ww / fbw;
         vc->gfx.scale_y = (double)wh / fbh;
-    } else if (vc->s->free_scale) {
+    } else if (vc->s->full_screen || vc->s->free_scale) {
+        /* Fullscreen keeps the guest's aspect too (letterboxed, centred) unless the
+         * user turned keep-aspect off. */
         double sx, sy;
 
         sx = (double)ww / fbw;
@@ -1435,6 +1554,30 @@ static void gd_menu_reset(GtkMenuItem *item, void *opaque)
 static void gd_menu_powerdown(GtkMenuItem *item, void *opaque)
 {
     qmp_system_powerdown(NULL);
+}
+
+/*
+ * Raphael desktop: QEMU runs in a container and cannot open host dialogs. "USB Devices..."
+ * rewrites the file named by RGPU_USB_REQUEST (in the run directory shared with the host);
+ * a host path unit opens the USB picker when it changes. No data is read from it.
+ */
+static void gd_menu_usb_request(GtkMenuItem *item, void *opaque)
+{
+    const char *path = g_getenv("RGPU_USB_REQUEST");
+    int fd;
+
+    if (!path || path[0] != '/') {
+        return;
+    }
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        warn_report("rgpu: cannot write USB picker request %s", path);
+        return;
+    }
+    if (write(fd, "usb\n", 4) != 4) {
+        warn_report("rgpu: short write to USB picker request %s", path);
+    }
+    close(fd);
 }
 
 static void gd_menu_quit(GtkMenuItem *item, void *opaque)
@@ -2381,6 +2524,14 @@ static GtkWidget *gd_create_menu_machine(GtkDisplayState *s)
     s->powerdown_item = gtk_menu_item_new_with_mnemonic(_("Power _Down"));
     gtk_menu_shell_append(GTK_MENU_SHELL(machine_menu), s->powerdown_item);
 
+    if (g_getenv("RGPU_USB_REQUEST")) {
+        GtkWidget *usb_item = gtk_menu_item_new_with_mnemonic(_("_USB Devices..."));
+        g_signal_connect(usb_item, "activate", G_CALLBACK(gd_menu_usb_request), s);
+        separator = gtk_separator_menu_item_new();
+        gtk_menu_shell_append(GTK_MENU_SHELL(machine_menu), separator);
+        gtk_menu_shell_append(GTK_MENU_SHELL(machine_menu), usb_item);
+    }
+
     separator = gtk_separator_menu_item_new();
     gtk_menu_shell_append(GTK_MENU_SHELL(machine_menu), separator);
 
@@ -2467,7 +2618,6 @@ add_gfx_console(GtkDisplayState *s, QemuConsole *con)
     {
         vc->gfx.drawing_area = gtk_drawing_area_new();
     }
-
 
     gtk_widget_add_events(vc->gfx.drawing_area,
                           GDK_POINTER_MOTION_MASK |
@@ -2820,7 +2970,8 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
     textdomain("qemu");
 
     window_display = gtk_widget_get_display(s->window);
-    if (s->opts->has_show_cursor && s->opts->show_cursor) {
+    if ((s->opts->has_show_cursor && s->opts->show_cursor) ||
+        g_strcmp0(g_getenv("RGPU_HOST_CURSOR"), "1") == 0) {
         s->null_cursor = NULL; /* default pointer */
     } else {
         s->null_cursor = gdk_cursor_new_for_display(window_display,
