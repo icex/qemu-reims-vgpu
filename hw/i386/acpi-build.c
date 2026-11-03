@@ -187,6 +187,12 @@ static void init_common_fadt_data(MachineState *ms, Object *o,
         },
     };
 
+    /* Opt-in fixed sleep button; otherwise retain the original FADT. */
+    if (object_property_find(o, "x-sleep-button") &&
+        object_property_get_bool(o, "x-sleep-button", NULL)) {
+        fadt.flags &= ~(1 << ACPI_FADT_F_SLP_BUTTON);
+    }
+
     /*
      * ACPI v2, Table 5-10 - Fixed ACPI Description Table Boot Architecture
      * Flags, bit offset 1 - 8042.

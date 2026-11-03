@@ -139,6 +139,9 @@ void qemu_register_wakeup_support(void);
 void qemu_system_shutdown_request_with_code(ShutdownCause reason,
                                             int exit_code);
 void qemu_system_shutdown_request(ShutdownCause reason);
+/* Request a guest-cooperative sleep button; never suspend the host or CPUs. */
+bool qemu_system_sleep_button_request(void);
+void qemu_register_sleep_button_notifier(Notifier *notifier);
 void qemu_system_powerdown_request(void);
 void qemu_register_powerdown_notifier(Notifier *notifier);
 void qemu_register_shutdown_notifier(Notifier *notifier);

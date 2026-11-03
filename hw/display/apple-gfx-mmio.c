@@ -184,6 +184,17 @@ static void apple_gfx_mmio_reset(Object *obj, ResetType type)
 {
     AppleGFXMMIOState *s = APPLE_GFX_MMIO(obj);
 
+    if (type == RESET_TYPE_WAKEUP && s->common.suspended) {
+        return;
+    }
+    if (s->common.suspended) {
+        rvg_device_unpause(s->common.pgdev);
+        s->common.suspended = false;
+        for (unsigned int i = 0; i < s->common.num_displays; i++) {
+            rvg_display_set_window_suspended(s->common.displays[i].pgdisp, false);
+        }
+    }
+    s->common.sleep_requested = false;
     rvg_device_reset(s->common.pgdev);
 }
 
@@ -200,6 +211,7 @@ static const Property apple_gfx_mmio_properties[] = {
      * own modes at its density.
      */
     DEFINE_PROP_STRING("resolution", AppleGFXMMIOState, common.resolution),
+    DEFINE_PROP_STRING("close-action", AppleGFXMMIOState, common.close_action),
     /* As apple-gfx-pci's */
     DEFINE_PROP_UINT32("window-readback-interval", AppleGFXMMIOState,
                        common.window_readback_interval_ms, 0),

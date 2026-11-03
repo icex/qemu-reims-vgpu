@@ -272,6 +272,20 @@ static void pm_reset(void *opaque)
     acpi_update_sci(&pm->acpi_regs, pm->irq);
 }
 
+/* This is a button press: the guest decides whether and when to enter S3. */
+static void pm_sleep_button_req(Notifier *n, void *opaque)
+{
+    ICH9LPCPMRegs *pm = container_of(n, ICH9LPCPMRegs, sleep_button_notifier);
+    bool *accepted = opaque;
+
+    if (pm->sleep_button && !pm->disable_s3 &&
+        (pm->acpi_regs.pm1.evt.en & ACPI_BITMASK_SLEEP_BUTTON_ENABLE)) {
+        pm->acpi_regs.pm1.evt.sts |= ACPI_BITMASK_SLEEP_BUTTON_STATUS;
+        pm->acpi_regs.tmr.update_sci(&pm->acpi_regs);
+        *accepted = true;
+    }
+}
+
 static void pm_powerdown_req(Notifier *n, void *opaque)
 {
     ICH9LPCPMRegs *pm = container_of(n, ICH9LPCPMRegs, powerdown_notifier);
@@ -328,6 +342,8 @@ void ich9_pm_init(PCIDevice *lpc_pci, ICH9LPCPMRegs *pm, qemu_irq sci_irq)
 
     pm->irq = sci_irq;
     qemu_register_reset(pm_reset, pm);
+    pm->sleep_button_notifier.notify = pm_sleep_button_req;
+    qemu_register_sleep_button_notifier(&pm->sleep_button_notifier);
     pm->powerdown_notifier.notify = pm_powerdown_req;
     qemu_register_powerdown_notifier(&pm->powerdown_notifier);
 

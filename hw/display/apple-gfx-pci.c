@@ -266,6 +266,18 @@ static void apple_gfx_pci_reset(Object *obj, ResetType type)
 {
     AppleGFXPCIState *s = APPLE_GFX_PCI(obj);
 
+    /* The S3 wake reset must preserve the paused device and its GPU state. */
+    if (type == RESET_TYPE_WAKEUP && s->common.suspended) {
+        return;
+    }
+    if (s->common.suspended) {
+        rvg_device_unpause(s->common.pgdev);
+        s->common.suspended = false;
+        for (unsigned int i = 0; i < s->common.num_displays; i++) {
+            rvg_display_set_window_suspended(s->common.displays[i].pgdisp, false);
+        }
+    }
+    s->common.sleep_requested = false;
     rvg_device_reset(s->common.pgdev);
     if (s->common.mmio_written) {
         memory_region_set_enabled(&s->efi_fb, false);
@@ -285,6 +297,7 @@ static const Property apple_gfx_pci_properties[] = {
      * own modes at its density.
      */
     DEFINE_PROP_STRING("resolution", AppleGFXPCIState, common.resolution),
+    DEFINE_PROP_STRING("close-action", AppleGFXPCIState, common.close_action),
     /*
      * With a window, the least milliseconds between two reads of a frame
      * back into QEMU's console surface (a SPICE or VNC listener's, a

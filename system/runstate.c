@@ -572,6 +572,8 @@ static int powerdown_requested;
 static int debug_requested;
 static int suspend_requested;
 static WakeupReason wakeup_reason;
+static NotifierList sleep_button_notifiers =
+    NOTIFIER_LIST_INITIALIZER(sleep_button_notifiers);
 static NotifierList powerdown_notifiers =
     NOTIFIER_LIST_INITIALIZER(powerdown_notifiers);
 static NotifierList suspend_notifiers =
@@ -1012,6 +1014,19 @@ static void qemu_system_shutdown(ShutdownCause cause)
 {
     qapi_event_send_shutdown(shutdown_caused_by_guest(cause), cause);
     notifier_list_notify(&shutdown_notifiers, &cause);
+}
+
+bool qemu_system_sleep_button_request(void)
+{
+    bool accepted = false;
+
+    notifier_list_notify(&sleep_button_notifiers, &accepted);
+    return accepted;
+}
+
+void qemu_register_sleep_button_notifier(Notifier *notifier)
+{
+    notifier_list_add(&sleep_button_notifiers, notifier);
 }
 
 void qemu_system_powerdown_request(void)

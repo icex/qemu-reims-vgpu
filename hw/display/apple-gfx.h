@@ -14,6 +14,7 @@
 #include "block/thread-pool.h"
 #include "qemu/queue.h"
 #include "qemu/thread.h"
+#include "qemu/notify.h"
 #include <reims_vgpu.h>
 
 #define TYPE_APPLE_GFX_MMIO         "apple-gfx-mmio"
@@ -78,6 +79,13 @@ struct AppleGFXState {
      * or "host" for the host screen's own modes; NULL is 1920x1080.
      */
     char *resolution;
+    /* NULL/poweroff is upstream behaviour; powerdown and suspend cooperate. */
+    char *close_action;
+    bool sleep_requested;
+    bool suspended;
+    bool sleep_notifiers_registered;
+    Notifier suspend_notifier;
+    Notifier wakeup_notifier;
     /*
      * Each display has a window of the library's, which draws its frames
      * and sends its input (-display none, unless REIMS_VGPU_WINDOW=0).

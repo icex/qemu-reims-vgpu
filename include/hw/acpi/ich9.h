@@ -52,6 +52,8 @@ typedef struct ICH9LPCPMRegs {
 
     uint32_t pm_io_base;
     Notifier powerdown_notifier;
+    Notifier sleep_button_notifier;
+    bool sleep_button;
 
     CPUHotplugState cpuhp_state;
 

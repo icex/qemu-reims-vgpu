@@ -445,11 +445,64 @@ static void apple_gfx_input_key(AppleGFXDisplay *d, uint16_t usage,
     qemu_input_event_send_key_linux(d->con, lnx, down);
 }
 
-static void apple_gfx_input_close(void)
+static bool apple_gfx_close_action_valid(const char *action)
 {
-    /* As QEMU's own windows do: closing one powers the VM off. */
-    shutdown_action = SHUTDOWN_ACTION_POWEROFF;
-    qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_UI);
+    return !action || !strcmp(action, "poweroff") ||
+           !strcmp(action, "powerdown") || !strcmp(action, "suspend");
+}
+
+static void apple_gfx_input_close(AppleGFXState *s)
+{
+    if (s->close_action && !strcmp(s->close_action, "powerdown")) {
+        /* Repeated X requests never escalate to an immediate poweroff. */
+        if (runstate_check(RUN_STATE_SUSPENDED)) {
+            error_report("apple-gfx: wake the guest before requesting shutdown");
+            return;
+        }
+        qemu_system_powerdown_request();
+    } else if (s->close_action && !strcmp(s->close_action, "suspend")) {
+        if (runstate_check(RUN_STATE_SUSPENDED)) {
+            return;
+        }
+        s->sleep_requested = qemu_system_sleep_button_request();
+        if (!s->sleep_requested) {
+            error_report("apple-gfx: guest sleep button unavailable; "
+                         "guest left running (use clean shutdown)");
+        }
+    } else {
+        shutdown_action = SHUTDOWN_ACTION_POWEROFF;
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_UI);
+    }
+}
+
+/* S3 keeps guest RAM and GPU resources in this process, without migration. */
+static void apple_gfx_suspend(Notifier *n, void *opaque)
+{
+    AppleGFXState *s = container_of(n, AppleGFXState, suspend_notifier);
+    unsigned int i;
+
+    if (!s->suspended) {
+        rvg_device_pause(s->pgdev);
+        s->suspended = true;
+        for (i = 0; i < s->num_displays; i++) {
+            rvg_display_set_window_suspended(s->displays[i].pgdisp, true);
+        }
+    }
+}
+
+static void apple_gfx_wakeup(Notifier *n, void *opaque)
+{
+    AppleGFXState *s = container_of(n, AppleGFXState, wakeup_notifier);
+    unsigned int i;
+
+    if (s->suspended) {
+        rvg_device_unpause(s->pgdev);
+        s->suspended = false;
+        s->sleep_requested = false;
+        for (i = 0; i < s->num_displays; i++) {
+            rvg_display_set_window_suspended(s->displays[i].pgdisp, false);
+        }
+    }
 }
 
 /* ------ Callbacks' work under the BQL ------ */
@@ -539,7 +592,7 @@ static void apple_gfx_event_run(AppleGFXEvent *event)
         apple_gfx_input_key(d, event->key.usage, event->key.down);
         break;
     case APPLE_GFX_EVENT_CLOSE:
-        apple_gfx_input_close();
+        apple_gfx_input_close(d->state);
         break;
     default:
         g_assert_not_reached();
@@ -635,10 +688,7 @@ void apple_gfx_common_init(Object *obj, AppleGFXState *s, const char *obj_name)
      */
     memory_region_enable_lockless_io(&s->iomem_gfx);
 
-    /*
-     * TODO: reims-vgpu can suspend and resume the device
-     * (rvg_device_will_suspend and the rest): integrate it!
-     */
+    /* S3 quiescing is registered only after the device and displays exist. */
 }
 
 typedef struct AppleGFXMemoryWalk {
@@ -1065,6 +1115,10 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
     uint32_t i;
 
     s->host_callbacks_submitted = false;
+    if (!apple_gfx_close_action_valid(s->close_action)) {
+        error_setg(errp, "apple-gfx: close-action must be poweroff, powerdown or suspend");
+        return false;
+    }
     if (s->num_displays < 1 || s->num_displays > RVG_MAX_DISPLAY_PORTS) {
         error_setg(errp, "apple-gfx: displays must be 1 to %u, not %" PRIu32,
                    RVG_MAX_DISPLAY_PORTS, s->num_displays);
@@ -1159,6 +1213,12 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
                                                          &s->displays[i]);
     }
 
+    s->suspend_notifier.notify = apple_gfx_suspend;
+    s->wakeup_notifier.notify = apple_gfx_wakeup;
+    qemu_register_suspend_notifier(&s->suspend_notifier);
+    qemu_register_wakeup_notifier(&s->wakeup_notifier);
+    s->sleep_notifiers_registered = true;
+
     /* App Nap would slow the VM while no window of QEMU's is seen. */
     apple_gfx_activity_begin();
     s->holds_activity = true;
@@ -1182,6 +1242,11 @@ fail:
 
 void apple_gfx_common_finalize(AppleGFXState *s)
 {
+    if (s->sleep_notifiers_registered) {
+        notifier_remove(&s->suspend_notifier);
+        notifier_remove(&s->wakeup_notifier);
+        s->sleep_notifiers_registered = false;
+    }
     if (s->holds_activity) {
         s->holds_activity = false;
         apple_gfx_activity_end();
