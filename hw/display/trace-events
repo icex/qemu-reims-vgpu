@@ -224,3 +224,5 @@ apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
 apple_gfx_pci_iosfc_read(uint64_t offset, uint64_t res, unsigned size) "offset=0x%"PRIx64" res=0x%"PRIx64" size=%u"
 apple_gfx_pci_iosfc_write(uint64_t offset, uint64_t val, unsigned size) "offset=0x%"PRIx64" val=0x%"PRIx64" size=%u"
 
+
+apple_gfx_close_request(const char *action) "action=%s"

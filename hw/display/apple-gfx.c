@@ -453,6 +453,8 @@ static bool apple_gfx_close_action_valid(const char *action)
 
 static void apple_gfx_input_close(AppleGFXState *s)
 {
+    trace_apple_gfx_close_request(s->close_action ? s->close_action : "poweroff");
+
     if (s->close_action && !strcmp(s->close_action, "powerdown")) {
         /* Repeated X requests never escalate to an immediate poweroff. */
         if (runstate_check(RUN_STATE_SUSPENDED)) {

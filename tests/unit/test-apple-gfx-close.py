@@ -22,6 +22,7 @@ source='''#include <assert.h>
 #define ACPI_BITMASK_SLEEP_BUTTON_ENABLE 0x200
 #define ACPI_BITMASK_SLEEP_BUTTON_STATUS 0x200
 #define error_report(...) (++errors)
+#define trace_apple_gfx_close_request(action) assert(apple_gfx_close_action_valid(action))
 typedef struct Notifier { int dummy; } Notifier;
 typedef struct Display { void *pgdisp; } Display;
 typedef struct AppleGFXState { char *close_action; bool sleep_requested,suspended; void *pgdev; unsigned num_displays; Display displays[2]; Notifier suspend_notifier,wakeup_notifier; } AppleGFXState;
