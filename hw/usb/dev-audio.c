@@ -34,6 +34,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/usb/usb.h"
 #include "migration/vmstate.h"
+#include "migration/qemu-file.h"
 #include "desc.h"
 #include "qemu/audio.h"
 #include "qom/object.h"
@@ -1011,10 +1012,85 @@ static void usb_audio_reinit(USBDevice *dev, unsigned channels)
     audio_be_set_active_out(s->audio_be, s->out.voice, 0);
 }
 
+/* Preserve USB protocol state, volume and queued PCM across a stopped-machine
+ * save. Host audio handles are reopened; only initialized pending bytes move. */
+static int usb_audio_saved_put(QEMUFile *f, void *opaque, size_t size,
+                                const VMStateField *field, JSONWriter *vmdesc)
+{
+    USBAudioState *s = opaque;
+    uint64_t used = s->out.buf.prod - s->out.buf.cons;
+    size_t offset, first;
+    if (used > s->out.buf.size || used > 16 * 1024 * 1024) {
+        return -EINVAL;
+    }
+    qemu_put_be32(f, s->out.altset);
+    qemu_put_be32(f, s->out.channels);
+    qemu_put_byte(f, s->out.vol.mute);
+    qemu_put_buffer(f, s->out.vol.vol, AUDIO_MAX_CHANNELS);
+    qemu_put_be32(f, used);
+    if (used) {
+        offset = s->out.buf.cons % s->out.buf.size;
+        first = MIN(used, s->out.buf.size - offset);
+        qemu_put_buffer(f, s->out.buf.data + offset, first);
+        qemu_put_buffer(f, s->out.buf.data, used - first);
+    }
+    return qemu_file_get_error(f);
+}
+
+static int usb_audio_saved_get(QEMUFile *f, void *opaque, size_t size,
+                                const VMStateField *field)
+{
+    USBAudioState *s = opaque;
+    uint32_t altset = qemu_get_be32(f), channels = qemu_get_be32(f);
+    bool mute = qemu_get_byte(f);
+    uint8_t volume[AUDIO_MAX_CHANNELS];
+    uint32_t used;
+    if (qemu_get_buffer(f, volume, sizeof(volume)) != sizeof(volume)) {
+        return -EIO;
+    }
+    used = qemu_get_be32(f);
+    if (altset > ALTSET_71 ||
+        (channels != 2 && channels != 6 && channels != 8) ||
+        (!s->multi && channels != 2) ||
+        (altset && altset_channels[altset] != channels) ||
+        used > 16 * 1024 * 1024) {
+        return -EINVAL;
+    }
+    usb_audio_reinit(USB_DEVICE(s), channels);
+    if (usb_audio_set_output_altset(s, altset) < 0 || used > s->out.buf.size) {
+        return -EINVAL;
+    }
+    s->out.vol.mute = mute;
+    memcpy(s->out.vol.vol, volume, sizeof(volume));
+    audio_be_set_volume_out(s->audio_be, s->out.voice, &s->out.vol);
+    if (qemu_get_buffer(f, s->out.buf.data, used) != used) {
+        return -EIO;
+    }
+    s->out.buf.cons = 0;
+    s->out.buf.prod = used;
+    return qemu_file_get_error(f);
+}
+
 static const VMStateDescription vmstate_usb_audio = {
     .name = TYPE_USB_AUDIO,
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_USB_DEVICE(dev, USBAudioState),
+        {
+            .name = "audio-stream",
+            .info = &(const VMStateInfo) {
+                .name = "usb-audio-stream",
+                .get = usb_audio_saved_get,
+                .put = usb_audio_saved_put,
+            },
+            .flags = VMS_SINGLE,
+            .offset = 0,
+        },
+        VMSTATE_END_OF_LIST()
+    },
 };
+
 
 static const Property usb_audio_properties[] = {
     DEFINE_AUDIO_PROPERTIES(USBAudioState, audio_be),

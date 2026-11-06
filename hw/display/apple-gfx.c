@@ -22,6 +22,7 @@
 #include "qapi/visitor.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-ui.h"
+#include "qapi/qapi-events-run-state.h"
 #include "system/address-spaces.h"
 #include "migration/blocker.h"
 #include "system/memory.h"
@@ -448,14 +449,23 @@ static void apple_gfx_input_key(AppleGFXDisplay *d, uint16_t usage,
 static bool apple_gfx_close_action_valid(const char *action)
 {
     return !action || !strcmp(action, "poweroff") ||
-           !strcmp(action, "powerdown") || !strcmp(action, "suspend");
+           !strcmp(action, "powerdown") || !strcmp(action, "suspend") ||
+           !strcmp(action, "pause");
 }
 
 static void apple_gfx_input_close(AppleGFXState *s)
 {
     trace_apple_gfx_close_request(s->close_action ? s->close_action : "poweroff");
 
-    if (s->close_action && !strcmp(s->close_action, "powerdown")) {
+    if (s->close_action && !strcmp(s->close_action, "pause")) {
+        /* Retain devices and RAM. Notify the desktop helper without injecting
+         * an ACPI power button into macOS or hiding the SDL/Vulkan surface. */
+        if (runstate_is_running()) {
+            qemu_system_vmstop_request_prepare();
+            qemu_system_vmstop_request(RUN_STATE_PAUSED);
+        }
+        qapi_event_send_powerdown();
+    } else if (s->close_action && !strcmp(s->close_action, "powerdown")) {
         /* Repeated X requests never escalate to an immediate poweroff. */
         if (runstate_check(RUN_STATE_SUSPENDED)) {
             error_report("apple-gfx: wake the guest before requesting shutdown");
@@ -1118,7 +1128,7 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
 
     s->host_callbacks_submitted = false;
     if (!apple_gfx_close_action_valid(s->close_action)) {
-        error_setg(errp, "apple-gfx: close-action must be poweroff, powerdown or suspend");
+        error_setg(errp, "apple-gfx: close-action must be poweroff, powerdown, suspend or pause");
         return false;
     }
     if (s->num_displays < 1 || s->num_displays > RVG_MAX_DISPLAY_PORTS) {
@@ -1133,7 +1143,7 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
         return false;
     }
 
-    if (apple_gfx_mig_blocker == NULL) {
+    if (!s->save_state && apple_gfx_mig_blocker == NULL) {
         error_setg(&apple_gfx_mig_blocker,
                   "Migration state blocked by apple-gfx display device");
         if (migrate_add_blocker(&apple_gfx_mig_blocker, errp) < 0) {

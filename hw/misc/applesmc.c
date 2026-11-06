@@ -31,6 +31,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "migration/vmstate.h"
 #include "hw/isa/isa.h"
 #include "hw/core/qdev-properties.h"
 #include "ui/console.h"
@@ -407,6 +408,26 @@ static void build_applesmc_aml(AcpiDevAmlIf *adev, Aml *scope)
     aml_append(scope, dev);
 }
 
+/* Immutable keys are constructed by realize from the pinned configuration.
+ * Preserve a command in progress, including its partially read key/data. */
+static const VMStateDescription vmstate_applesmc = {
+    .name = "applesmc",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(cmd, AppleSMCState),
+        VMSTATE_UINT8(status, AppleSMCState),
+        VMSTATE_UINT8(status_1e, AppleSMCState),
+        VMSTATE_UINT8(last_ret, AppleSMCState),
+        VMSTATE_BUFFER_UNSAFE(key, AppleSMCState, 0, 4),
+        VMSTATE_UINT8(read_pos, AppleSMCState),
+        VMSTATE_UINT8(data_len, AppleSMCState),
+        VMSTATE_UINT8(data_pos, AppleSMCState),
+        VMSTATE_BUFFER(data, AppleSMCState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void qdev_applesmc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -415,6 +436,7 @@ static void qdev_applesmc_class_init(ObjectClass *klass, const void *data)
     dc->realize = applesmc_isa_realize;
     dc->unrealize = applesmc_unrealize;
     device_class_set_legacy_reset(dc, qdev_applesmc_isa_reset);
+    dc->vmsd = &vmstate_applesmc;
     device_class_set_props(dc, applesmc_isa_properties);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     adevc->build_dev_aml = build_applesmc_aml;

@@ -61,6 +61,8 @@ struct AppleGFXState {
     /* Initialised on init/realize() */
     MemoryRegion iomem_gfx;
     RvgDevice *pgdev;
+    RvgIOSurfaceDevice *pgmapper; /* borrowed from the PCI mapper */
+    bool save_state; /* explicit opt-in to stopped-machine migration */
     /* This realization passed the valid host callback table to the library. */
     bool host_callbacks_submitted;
     /* Called after the library takes a guest write; may take the BQL */

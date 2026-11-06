@@ -17,6 +17,7 @@ source='''#include <assert.h>
 #include <stdio.h>
 #define container_of(ptr,type,member) ((type*)((char*)(ptr)-offsetof(type,member)))
 #define RUN_STATE_SUSPENDED 1
+#define RUN_STATE_PAUSED 2
 #define SHUTDOWN_ACTION_POWEROFF 3
 #define SHUTDOWN_CAUSE_HOST_UI 4
 #define ACPI_BITMASK_SLEEP_BUTTON_ENABLE 0x200
@@ -27,7 +28,12 @@ typedef struct Notifier { int dummy; } Notifier;
 typedef struct Display { void *pgdisp; } Display;
 typedef struct AppleGFXState { char *close_action; bool sleep_requested,suspended; void *pgdev; unsigned num_displays; Display displays[2]; Notifier suspend_notifier,wakeup_notifier; } AppleGFXState;
 static int shutdown_action, off,down,sleep_requests,pauses,unpauses,markers,errors,sci_updates;
-static bool actual_suspended,accepted,last_marker;
+static bool actual_suspended,accepted,last_marker,running=true;
+static int prepared,vmstops,notifications;
+static bool runstate_is_running(void){return running;}
+static void qemu_system_vmstop_request_prepare(void){++prepared;}
+static void qemu_system_vmstop_request(int state){assert(state==RUN_STATE_PAUSED);++vmstops;}
+static void qapi_event_send_powerdown(void){++notifications;}
 static bool runstate_check(int x){assert(x==1);return actual_suspended;}
 static void qemu_system_shutdown_request(int x){assert(x==4);++off;}
 static void qemu_system_powerdown_request(void){++down;}
@@ -54,6 +60,9 @@ source+='''int main(void) {
  actual_suspended=true;apple_gfx_suspend(&s.suspend_notifier,NULL);apple_gfx_suspend(&s.suspend_notifier,NULL);assert(pauses==1&&s.suspended&&markers==1&&last_marker);
  apple_gfx_input_close(&s);assert(sleep_requests==3&&off==1);
  apple_gfx_wakeup(&s.wakeup_notifier,NULL);apple_gfx_wakeup(&s.wakeup_notifier,NULL);assert(unpauses==1&&!s.suspended&&!s.sleep_requested&&markers==2&&!last_marker);
+ s.close_action="pause";actual_suspended=false;
+ apple_gfx_input_close(&s);assert(prepared==1&&vmstops==1&&notifications==1&&down==2&&off==1&&sleep_requests==3);
+ running=false;apple_gfx_input_close(&s);assert(prepared==1&&vmstops==1&&notifications==2&&down==2&&off==1);
  ICH9LPCPMRegs pm={0};pm.acpi_regs.tmr.update_sci=update_sci;bool ok=false;
  pm_sleep_button_req(&pm.sleep_button_notifier,&ok);assert(!ok&&sci_updates==0);
  pm.sleep_button=true;pm_sleep_button_req(&pm.sleep_button_notifier,&ok);assert(!ok&&sci_updates==0);
